@@ -21,8 +21,17 @@ jobs:
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             export VERSION="${GITHUB_REF_NAME#v}"
           fi
-          UNIVERSAL=1 ./scripts/bundle.sh
+          set -o pipefail
+          UNIVERSAL=1 ./scripts/bundle.sh 2>&1 | tee build.log
           cd build && ditto -c -k --keepParent BarMatrix.app BarMatrix.zip
+
+      # 把编译错误转成注解，在 PR 页面上直接可见
+      - name: Report compiler errors
+        if: failure()
+        run: |
+          grep -E "error:" build.log | sort -u | head -50 | while IFS= read -r line; do
+            echo "::error::${line#$GITHUB_WORKSPACE/}"
+          done
 
       - uses: actions/upload-artifact@v4
         with:
