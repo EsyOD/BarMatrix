@@ -15,6 +15,7 @@ final class MenuBarController: NSObject {
     private let prefs: Preferences
     private let openSettings: () -> Void
     private var collapseTimer: Timer?
+    private let panel = HiddenItemsPanel()
     private var cancellables = Set<AnyCancellable>()
 
     private static let expandedLength: CGFloat = 8
@@ -44,6 +45,8 @@ final class MenuBarController: NSObject {
             button.sendAction(on: [.rightMouseUp])
         }
 
+        panel.onSelect = { [weak self] item in self?.activate(item) }
+
         prefs.$showSeparator
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.updateAppearance() }
@@ -63,15 +66,17 @@ final class MenuBarController: NSObject {
         isCollapsed = true
     }
 
-    func expand() {
+    /// temporarily 为 true 时，即使关闭了自动折叠，也会在一段时间后收起。
+    func expand(temporarily: Bool = false) {
         isCollapsed = false
-        scheduleAutoCollapse()
+        scheduleAutoCollapse(force: temporarily)
     }
 
-    private func scheduleAutoCollapse() {
+    private func scheduleAutoCollapse(force: Bool = false) {
         collapseTimer?.invalidate()
-        guard prefs.autoCollapse else { return }
-        collapseTimer = Timer.scheduledTimer(withTimeInterval: prefs.collapseDelay, repeats: false) { [weak self] _ in
+        guard prefs.autoCollapse || force else { return }
+        let delay = prefs.autoCollapse ? prefs.collapseDelay : 10
+        collapseTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
             self?.collapse()
         }
     }
@@ -80,6 +85,28 @@ final class MenuBarController: NSObject {
         guard let sep = separator.button?.window?.frame.minX,
               let tog = toggle.button?.window?.frame.minX else { return false }
         return sep < tog
+    }
+
+    // MARK: - 弹出面板
+
+    private func togglePanel() {
+        if panel.isVisible {
+            panel.close()
+            return
+        }
+        guard let anchor = toggle.button?.window?.frame,
+              let separatorX = separator.button?.window?.frame.minX else { return }
+        panel.show(items: MenuBarItems.hidden(leftOf: separatorX), below: anchor)
+    }
+
+    /// 点击面板里的图标：临时展开菜单栏，再替用户点一下真正的图标。
+    private func activate(_ item: MenuBarItem) {
+        expand(temporarily: true)
+        guard MenuBarItems.ensureAccessibility(prompt: true) else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            guard let frame = MenuBarItems.frame(of: item.windowID) else { return }
+            MenuBarItems.click(at: CGPoint(x: frame.midX, y: frame.midY))
+        }
     }
 
     // MARK: - 外观
@@ -109,14 +136,20 @@ final class MenuBarController: NSObject {
 
     // MARK: - 点击
 
+    /// 左键：弹出面板或展开（按住 ⌥ 时用另一种方式）；右键或 ⌃ 点击：菜单。
     @objc private func toggleClicked(_ sender: NSStatusBarButton) {
         let event = NSApp.currentEvent
-        if event?.type == .rightMouseUp || event?.modifierFlags.contains(.control) == true {
+        let flags = event?.modifierFlags ?? []
+        if event?.type == .rightMouseUp || flags.contains(.control) {
+            panel.close()
             showMenu(from: sender)
-        } else if isCollapsed {
-            expand()
-        } else {
+        } else if !isCollapsed {
+            panel.close()
             collapse()
+        } else if prefs.clickOpensPanel != flags.contains(.option) {
+            togglePanel()
+        } else {
+            expand()
         }
     }
 
