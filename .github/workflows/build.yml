@@ -1,0 +1,58 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build BarMatrix.app
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            export VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          set -o pipefail
+          UNIVERSAL=1 ./scripts/bundle.sh 2>&1 | tee build.log
+          cd build && ditto -c -k --keepParent BarMatrix.app BarMatrix.zip
+
+      # 把编译错误转成注解，在 PR 页面上直接可见
+      - name: Report compiler errors
+        if: failure()
+        run: |
+          { grep -E "error:" build.log || tail -n 20 build.log; } | sort -u | head -50 | while IFS= read -r line; do
+            echo "::error::${line#$GITHUB_WORKSPACE/}"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BarMatrix
+          path: build/BarMatrix.zip
+
+      # main 分支每次更新都刷新 “latest” 预发布版本，方便直接下载测试
+      - name: Publish latest build
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest build/BarMatrix.zip \
+            --prerelease --target "$GITHUB_SHA" \
+            --title "最新测试版" \
+            --notes "main 分支 ${GITHUB_SHA::7} 自动构建。下载后若提示无法打开，请运行：xattr -dr com.apple.quarantine /Applications/BarMatrix.app"
+
+      # 推送 v* 标签时发布正式版本
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" build/BarMatrix.zip --generate-notes

@@ -11,7 +11,17 @@
 
 原理：折叠时把分隔线的宽度撑到很大，把它左边的图标挤出屏幕，不需要辅助功能或屏幕录制权限。
 
-## 运行
+## 下载
+
+到 [Releases](https://github.com/EsyOD/BarMatrix/releases) 下载 `BarMatrix.zip`（`latest` 是 main 分支的最新构建），解压后拖进「应用程序」。
+
+应用没有经过 Apple 公证，第一次打开如果提示“已损坏”或“无法验证开发者”，在终端运行：
+
+```sh
+xattr -dr com.apple.quarantine /Applications/BarMatrix.app
+```
+
+## 从源码运行
 
 需要 macOS 13+ 和 Xcode 15+（或 Swift 5.9 工具链）。
 

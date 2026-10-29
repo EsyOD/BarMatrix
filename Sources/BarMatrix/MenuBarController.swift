@@ -9,7 +9,7 @@ import Combine
 ///
 /// 用户按住 ⌘ 把不常用的图标拖到分隔符左边。折叠时把分隔符的宽度
 /// 撑到很大，它左边的图标就被挤出屏幕；展开时恢复正常宽度。
-final class MenuBarController {
+final class MenuBarController: NSObject {
     private let toggle = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let separator = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let prefs: Preferences
@@ -27,6 +27,7 @@ final class MenuBarController {
     init(prefs: Preferences, openSettings: @escaping () -> Void) {
         self.prefs = prefs
         self.openSettings = openSettings
+        super.init()
 
         // autosaveName 让系统记住用户拖动后的位置。
         toggle.autosaveName = "BarMatrixToggle"
