@@ -71,14 +71,14 @@ final class HiddenItemsPanel {
         } else if !MenuBarItems.canCapture {
             model.state = .needsPermission
         } else {
-            // 先用应用图标占位，截图完成后替换。
+            // 先显示缓存的截图（没有时用占位），实时截图成功后替换。
             model.state = .items(items)
             loadTask = Task { @MainActor [weak self] in
                 let images = await MenuBarItems.captureImages(for: items)
                 guard let self, !Task.isCancelled, self.window.isVisible else { return }
                 self.model.state = .items(items.map { item in
                     var item = item
-                    item.image = images[item.windowID]
+                    item.image = images[item.windowID] ?? item.image
                     return item
                 })
                 self.layout(below: anchor)

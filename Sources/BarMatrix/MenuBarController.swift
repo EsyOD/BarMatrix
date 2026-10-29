@@ -15,6 +15,10 @@ final class MenuBarController: NSObject {
     private let prefs: Preferences
     private let openSettings: () -> Void
     private var collapseTimer: Timer?
+    /// 每次折叠/展开加一，用来丢弃过时的异步折叠。
+    private var transition = 0
+    /// 隐藏图标的截图，在它们还显示在菜单栏上时截取。
+    private var imageCache: [CGWindowID: CGImage] = [:]
     private let panel = HiddenItemsPanel()
     private var cancellables = Set<AnyCancellable>()
 
@@ -63,11 +67,20 @@ final class MenuBarController: NSObject {
         // 分隔符跑到了折叠按钮右边时，折叠会把按钮自己也挤出屏幕，这时不折叠。
         guard isSeparatorLeftOfToggle else { return }
         collapseTimer?.invalidate()
-        isCollapsed = true
+        guard !isCollapsed else { return }
+        transition += 1
+        let current = transition
+        // 图标被挤出屏幕后系统就不再绘制它们，所以先趁它们还可见时截图缓存。
+        Task { @MainActor [weak self] in
+            await self?.refreshImageCache()
+            guard let self, current == self.transition, self.isSeparatorLeftOfToggle else { return }
+            self.isCollapsed = true
+        }
     }
 
     /// temporarily 为 true 时，即使关闭了自动折叠，也会在一段时间后收起。
     func expand(temporarily: Bool = false) {
+        transition += 1
         isCollapsed = false
         scheduleAutoCollapse(force: temporarily)
     }
@@ -96,7 +109,22 @@ final class MenuBarController: NSObject {
         }
         guard let anchor = toggle.button?.window?.frame,
               let separatorX = separator.button?.window?.frame.minX else { return }
-        panel.show(items: MenuBarItems.hidden(leftOf: separatorX), below: anchor)
+        let items = MenuBarItems.hidden(leftOf: separatorX).map { item in
+            var item = item
+            item.image = imageCache[item.windowID]
+            return item
+        }
+        panel.show(items: items, below: anchor)
+    }
+
+    private func refreshImageCache() async {
+        guard MenuBarItems.canCapture,
+              let separatorX = separator.button?.window?.frame.minX else { return }
+        let all = MenuBarItems.all()
+        let visible = all.filter { $0.frame.maxX <= separatorX + 1 && $0.frame.minX >= 0 }
+        let images = await MenuBarItems.captureImages(for: visible)
+        let alive = Set(all.map(\.windowID))
+        imageCache = imageCache.filter { alive.contains($0.key) }.merging(images) { _, new in new }
     }
 
     /// 点击面板里的图标：临时展开菜单栏，再替用户点一下真正的图标。
