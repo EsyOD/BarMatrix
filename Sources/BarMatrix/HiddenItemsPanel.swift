@@ -20,7 +20,7 @@ final class HiddenItemsPanel {
 
     private let model: Model
     private let window: NSPanel
-    private let hosting: NSHostingView<HiddenItemsView>
+    private let hosting: FirstMouseHostingView<HiddenItemsView>
     private var clickMonitor: Any?
     private var loadTask: Task<Void, Never>?
 
@@ -30,7 +30,7 @@ final class HiddenItemsPanel {
     init() {
         let model = Model()
         self.model = model
-        window = NSPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel],
+        window = KeyablePanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel],
                          backing: .buffered, defer: true)
         window.isFloatingPanel = true
         window.level = .popUpMenu
@@ -46,7 +46,7 @@ final class HiddenItemsPanel {
         background.state = .active
         background.maskImage = Self.roundedMask(radius: 10)
 
-        hosting = NSHostingView(rootView: HiddenItemsView(model: model))
+        hosting = FirstMouseHostingView(rootView: HiddenItemsView(model: model))
         hosting.translatesAutoresizingMaskIntoConstraints = false
         background.addSubview(hosting)
         NSLayoutConstraint.activate([
@@ -94,6 +94,7 @@ final class HiddenItemsPanel {
         }
         layout(below: anchor)
         window.orderFrontRegardless()
+        window.makeKey()
         startMonitoringClicks()
     }
 
@@ -105,6 +106,7 @@ final class HiddenItemsPanel {
     }
 
     private func select(_ item: MenuBarItem) {
+        Log.write("panel: selected window \(item.windowID) (\(item.appName))")
         close()
         onSelect(item)
     }
@@ -138,6 +140,15 @@ final class HiddenItemsPanel {
         image.resizingMode = .stretch
         return image
     }
+}
+
+/// 无边框面板默认不能成为 key window，第一次点击会被用来激活窗口而不是按钮。
+private final class KeyablePanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+}
+
+final class FirstMouseHostingView<Content: View>: NSHostingView<Content> {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
 struct HiddenItemsView: View {

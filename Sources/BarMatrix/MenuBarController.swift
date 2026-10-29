@@ -169,10 +169,16 @@ final class MenuBarController: NSObject {
     /// 点击面板里的图标：临时展开菜单栏，再替用户按下真正的图标。
     private func activate(_ item: MenuBarItem) {
         expand(temporarily: true)
-        guard MenuBarItems.ensureAccessibility(prompt: true) else { return }
+        let trusted = MenuBarItems.ensureAccessibility(prompt: true)
+        Log.write("activate: window \(item.windowID) owner \(item.ownerPID) frame \(item.frame) accessibility \(trusted)")
+        guard trusted else { return }
         // 等菜单栏重新排好图标的位置。
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-            guard let frame = MenuBarItems.frame(of: item.windowID) else { return }
+            guard let frame = MenuBarItems.frame(of: item.windowID) else {
+                Log.write("activate: window \(item.windowID) no longer exists")
+                return
+            }
+            Log.write("activate: expanded frame \(frame)")
             if !MenuBarItems.press(itemAt: frame, ownerPID: item.ownerPID) {
                 MenuBarItems.click(at: CGPoint(x: frame.midX, y: frame.midY))
             }
@@ -228,10 +234,18 @@ final class MenuBarController: NSObject {
         let settings = NSMenuItem(title: "设置…", action: #selector(settingsClicked), keyEquivalent: ",")
         settings.target = self
         menu.addItem(settings)
+        let log = NSMenuItem(title: "显示日志", action: #selector(showLog), keyEquivalent: "")
+        log.target = self
+        menu.addItem(log)
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "退出 BarMatrix", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
     }
 
     @objc private func settingsClicked() { openSettings() }
+
+    @objc private func showLog() {
+        if !FileManager.default.fileExists(atPath: Log.url.path) { Log.write("log created") }
+        NSWorkspace.shared.activateFileViewerSelecting([Log.url])
+    }
 }
