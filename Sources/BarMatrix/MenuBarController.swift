@@ -166,13 +166,16 @@ final class MenuBarController: NSObject {
         peekedIDs.formIntersection(alive)
     }
 
-    /// 点击面板里的图标：临时展开菜单栏，再替用户点一下真正的图标。
+    /// 点击面板里的图标：临时展开菜单栏，再替用户按下真正的图标。
     private func activate(_ item: MenuBarItem) {
         expand(temporarily: true)
         guard MenuBarItems.ensureAccessibility(prompt: true) else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+        // 等菜单栏重新排好图标的位置。
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
             guard let frame = MenuBarItems.frame(of: item.windowID) else { return }
-            MenuBarItems.click(at: CGPoint(x: frame.midX, y: frame.midY))
+            if !MenuBarItems.press(itemAt: frame, ownerPID: item.ownerPID) {
+                MenuBarItems.click(at: CGPoint(x: frame.midX, y: frame.midY))
+            }
         }
     }
 

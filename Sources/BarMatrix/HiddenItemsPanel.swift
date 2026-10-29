@@ -12,6 +12,8 @@ final class HiddenItemsPanel {
 
     final class Model: ObservableObject {
         @Published var state = State.loading
+        @Published var canClick = true
+        var onRequestAccessibility: () -> Void = {}
         var onSelect: (MenuBarItem) -> Void = { _ in }
         var onRequestPermission: () -> Void = {}
     }
@@ -56,6 +58,11 @@ final class HiddenItemsPanel {
         window.contentView = background
 
         model.onSelect = { [weak self] item in self?.select(item) }
+        model.onRequestAccessibility = { [weak self] in
+            self?.close()
+            MenuBarItems.ensureAccessibility(prompt: true)
+            NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
+        }
         model.onRequestPermission = { [weak self] in
             self?.close()
             CGRequestScreenCaptureAccess()
@@ -66,6 +73,7 @@ final class HiddenItemsPanel {
     /// 在 anchor（折叠按钮所在的屏幕区域）下方显示面板。
     func show(items: [MenuBarItem], below anchor: NSRect) {
         loadTask?.cancel()
+        model.canClick = MenuBarItems.ensureAccessibility(prompt: false)
         if items.isEmpty {
             model.state = .empty
         } else if !MenuBarItems.canCapture {
@@ -163,9 +171,20 @@ struct HiddenItemsView: View {
             }
             .padding(14)
         case .items(let items):
-            HStack(spacing: 2) {
-                ForEach(items) { item in
-                    ItemButton(item: item) { model.onSelect(item) }
+            VStack(spacing: 4) {
+                HStack(spacing: 2) {
+                    ForEach(items) { item in
+                        ItemButton(item: item) { model.onSelect(item) }
+                    }
+                }
+                if !model.canClick {
+                    Button { model.onRequestAccessibility() } label: {
+                        Label("点击打开图标需要「辅助功能」权限", systemImage: "hand.tap")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.bottom, 2)
                 }
             }
             .padding(5)
