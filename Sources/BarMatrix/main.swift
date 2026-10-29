@@ -11,8 +11,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func showSettings() {
+        guard let controller else { return }
         if settingsWindow == nil {
-            let window = NSWindow(contentViewController: NSHostingController(rootView: SettingsView(prefs: prefs)))
+            let view = SettingsView(prefs: prefs, items: ItemsModel(controller: controller))
+            let window = NSWindow(contentViewController: NSHostingController(rootView: view))
             window.title = "BarMatrix"
             window.styleMask.remove([.resizable, .miniaturizable])
             window.isReleasedWhenClosed = false

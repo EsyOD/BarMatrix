@@ -6,7 +6,6 @@ final class Preferences: ObservableObject {
     @Published var autoCollapse: Bool { didSet { defaults.set(autoCollapse, forKey: "autoCollapse") } }
     @Published var collapseDelay: Double { didSet { defaults.set(collapseDelay, forKey: "collapseDelay") } }
     @Published var showSeparator: Bool { didSet { defaults.set(showSeparator, forKey: "showSeparator") } }
-    @Published var clickOpensPanel: Bool { didSet { defaults.set(clickOpensPanel, forKey: "clickOpensPanel") } }
     @Published var launchAtLogin: Bool {
         didSet {
             do {
@@ -21,11 +20,10 @@ final class Preferences: ObservableObject {
     private let defaults = UserDefaults.standard
 
     init() {
-        defaults.register(defaults: ["autoCollapse": true, "collapseDelay": 10.0, "showSeparator": true, "clickOpensPanel": true])
+        defaults.register(defaults: ["autoCollapse": true, "collapseDelay": 10.0, "showSeparator": true])
         autoCollapse = defaults.bool(forKey: "autoCollapse")
         collapseDelay = defaults.double(forKey: "collapseDelay")
         showSeparator = defaults.bool(forKey: "showSeparator")
-        clickOpensPanel = defaults.bool(forKey: "clickOpensPanel")
         launchAtLogin = SMAppService.mainApp.status == .enabled
     }
 }
