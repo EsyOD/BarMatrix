@@ -167,7 +167,7 @@ enum MenuBarItems {
         return app
     }
 
-    private static func findExtra(at frame: CGRect, ownerPID: pid_t?) -> (AXUIElement, NSRunningApplication)? {
+    private static func findExtra(at frame: CGRect, ownerPID: pid_t?) -> (element: AXUIElement, app: NSRunningApplication)? {
         var apps = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy != .prohibited }
         // 先查图标所属的应用（新版 macOS 上所属进程是控制中心，这时只能逐个找）。
         if let ownerPID, let index = apps.firstIndex(where: { $0.processIdentifier == ownerPID }) {
