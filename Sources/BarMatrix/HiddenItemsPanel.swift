@@ -16,16 +16,20 @@ final class HiddenItemsPanel {
         var onRequestAccessibility: () -> Void = {}
         var onSelect: (MenuBarItem) -> Void = { _ in }
         var onRequestPermission: () -> Void = {}
+        /// 鼠标当前悬停的图标，右键时用来确定点的是哪个。
+        var hoveredID: CGWindowID?
     }
 
     private let model: Model
     private let window: NSPanel
     private let hosting: FirstMouseHostingView<HiddenItemsView>
     private var clickMonitor: Any?
+    private var rightClickMonitor: Any?
     private var loadTask: Task<Void, Never>?
 
     var isVisible: Bool { window.isVisible }
     var onSelect: (MenuBarItem) -> Void = { _ in }
+    var onOpenApp: (MenuBarItem) -> Void = { _ in }
 
     init() {
         let model = Model()
@@ -102,7 +106,9 @@ final class HiddenItemsPanel {
         loadTask?.cancel()
         window.orderOut(nil)
         if let clickMonitor { NSEvent.removeMonitor(clickMonitor) }
+        if let rightClickMonitor { NSEvent.removeMonitor(rightClickMonitor) }
         clickMonitor = nil
+        rightClickMonitor = nil
     }
 
     private func select(_ item: MenuBarItem) {
@@ -124,6 +130,17 @@ final class HiddenItemsPanel {
     /// 点击面板以外的地方时关闭。
     private func startMonitoringClicks() {
         guard clickMonitor == nil else { return }
+        // 右键面板里的图标：直接打开它所属的应用。
+        rightClickMonitor = NSEvent.addLocalMonitorForEvents(matching: .rightMouseDown) { [weak self] event in
+            guard let self, event.window === self.window,
+                  case .items(let items) = self.model.state,
+                  let item = items.first(where: { $0.windowID == self.model.hoveredID })
+            else { return event }
+            self.close()
+            Log.write("panel: right-clicked window \(item.windowID)")
+            self.onOpenApp(item)
+            return nil
+        }
         clickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
             self?.close()
         }
@@ -186,6 +203,10 @@ struct HiddenItemsView: View {
                 HStack(spacing: 2) {
                     ForEach(items) { item in
                         ItemButton(item: item) { model.onSelect(item) }
+                            .onHover { inside in
+                                if inside { model.hoveredID = item.windowID }
+                                else if model.hoveredID == item.windowID { model.hoveredID = nil }
+                            }
                     }
                 }
                 if !model.canClick {

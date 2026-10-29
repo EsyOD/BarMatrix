@@ -151,6 +151,23 @@ enum MenuBarItems {
     /// 用辅助功能接口找到位于 frame 处的菜单栏图标并“按下”它，效果和点击一样，
     /// 但不用移动鼠标。找不到时返回 false。
     static func press(itemAt frame: CGRect, ownerPID: pid_t?) -> Bool {
+        guard let found = findExtra(at: frame, ownerPID: ownerPID) else { return false }
+        let (element, app) = found
+        let result = AXUIElementPerformAction(element, kAXPressAction as CFString)
+        Log.write("press: AXPress on \(app.localizedName ?? "?") -> \(result.rawValue)")
+        return result == .success
+    }
+
+    /// 真正拥有这个菜单栏图标的应用。新版 macOS 上图标窗口都属于控制中心，
+    /// 只能通过辅助功能接口按位置反查。
+    static func owningApp(ofItemAt frame: CGRect, ownerPID: pid_t?) -> NSRunningApplication? {
+        if let app = findExtra(at: frame, ownerPID: ownerPID)?.app { return app }
+        guard let ownerPID, let app = NSRunningApplication(processIdentifier: ownerPID),
+              app.bundleIdentifier != "com.apple.controlcenter" else { return nil }
+        return app
+    }
+
+    private static func findExtra(at frame: CGRect, ownerPID: pid_t?) -> (AXUIElement, NSRunningApplication)? {
         var apps = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy != .prohibited }
         // 先查图标所属的应用（新版 macOS 上所属进程是控制中心，这时只能逐个找）。
         if let ownerPID, let index = apps.firstIndex(where: { $0.processIdentifier == ownerPID }) {
@@ -172,14 +189,11 @@ enum MenuBarItems {
                 if distance < (nearest?.distance ?? .infinity) {
                     nearest = (distance, elementFrame, app.localizedName ?? "?")
                 }
-                guard distance < 8 else { continue }
-                let result = AXUIElementPerformAction(element, kAXPressAction as CFString)
-                Log.write("press: AXPress on \(app.localizedName ?? "?") at \(elementFrame) -> \(result.rawValue)")
-                if result == .success { return true }
+                if distance < 8 { return (element, app) }
             }
         }
-        Log.write("press: no match for \(frame); scanned \(scanned) extras, nearest \(String(describing: nearest))")
-        return false
+        Log.write("ax: no extra at \(frame); scanned \(scanned), nearest \(String(describing: nearest))")
+        return nil
     }
 
     private static func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {

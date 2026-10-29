@@ -52,6 +52,7 @@ final class MenuBarController: NSObject {
         }
 
         panel.onSelect = { [weak self] item in self?.activate(item) }
+        panel.onOpenApp = { [weak self] item in self?.openApp(item) }
 
         prefs.$showSeparator
             .receive(on: RunLoop.main)
@@ -164,6 +165,24 @@ final class MenuBarController: NSObject {
         let alive = Set(MenuBarItems.all().map(\.windowID))
         imageCache = imageCache.filter { alive.contains($0.key) }.merging(images) { _, new in new }
         peekedIDs.formIntersection(alive)
+    }
+
+    /// 右键面板里的图标：打开（激活）它所属的应用，菜单栏保持收起。
+    private func openApp(_ item: MenuBarItem) {
+        let trusted = MenuBarItems.ensureAccessibility(prompt: false)
+        let app = MenuBarItems.owningApp(ofItemAt: item.frame, ownerPID: trusted ? item.ownerPID : nil)
+            ?? NSRunningApplication(processIdentifier: item.ownerPID).flatMap {
+                $0.bundleIdentifier == "com.apple.controlcenter" ? nil : $0
+            }
+        guard let app, let url = app.bundleURL else {
+            Log.write("openApp: owner of window \(item.windowID) not found (accessibility \(trusted))")
+            NSSound.beep()
+            return
+        }
+        Log.write("openApp: \(app.localizedName ?? "?") at \(url.path)")
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        NSWorkspace.shared.openApplication(at: url, configuration: configuration)
     }
 
     /// 点击面板里的图标：临时展开菜单栏，再替用户按下真正的图标。
