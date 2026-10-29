@@ -117,6 +117,7 @@ final class MenuBarController: NSObject {
         panel.show(items: items, below: anchor)
     }
 
+    @MainActor
     private func refreshImageCache() async {
         guard MenuBarItems.canCapture,
               let separatorX = separator.button?.window?.frame.minX else { return }
