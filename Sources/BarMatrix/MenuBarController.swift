@@ -15,8 +15,6 @@ final class MenuBarController: NSObject {
     private let prefs: Preferences
     private let openSettings: () -> Void
     private var collapseTimer: Timer?
-    /// 每次折叠/展开加一，用来丢弃过时的异步操作。
-    private var transition = 0
     private var cancellables = Set<AnyCancellable>()
 
     private static let expandedLength: CGFloat = 8
@@ -61,23 +59,19 @@ final class MenuBarController: NSObject {
     func collapse() {
         // 分隔符跑到了折叠按钮右边时，折叠会把按钮自己也挤出屏幕，这时不折叠。
         guard isSeparatorLeftOfToggle else { return }
-        transition += 1
         collapseTimer?.invalidate()
         isCollapsed = true
     }
 
-    /// temporarily 为 true 时，即使关闭了自动折叠，也会在一段时间后收起。
-    func expand(temporarily: Bool = false) {
-        transition += 1
+    func expand() {
         isCollapsed = false
-        scheduleAutoCollapse(force: temporarily)
+        scheduleAutoCollapse()
     }
 
-    private func scheduleAutoCollapse(force: Bool = false) {
+    private func scheduleAutoCollapse() {
         collapseTimer?.invalidate()
-        guard prefs.autoCollapse || force else { return }
-        let delay = prefs.autoCollapse ? prefs.collapseDelay : 10
-        collapseTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+        guard prefs.autoCollapse else { return }
+        collapseTimer = Timer.scheduledTimer(withTimeInterval: prefs.collapseDelay, repeats: false) { [weak self] _ in
             self?.collapse()
         }
     }
@@ -86,45 +80,6 @@ final class MenuBarController: NSObject {
         guard let sep = separator.button?.window?.frame.minX,
               let tog = toggle.button?.window?.frame.minX else { return false }
         return sep < tog
-    }
-
-    // MARK: - 选择隐藏的图标
-
-    private var currentScreen: NSScreen? { toggle.button?.window?.screen ?? NSScreen.main }
-
-    /// 当前屏幕菜单栏上的其他图标，以及它们是否在隐藏区。
-    func items() -> [(item: MenuBarItem, isHidden: Bool)] {
-        guard let screen = currentScreen,
-              let separatorX = separator.button?.window?.frame.minX else { return [] }
-        let hidden = Set(MenuBarItems.hidden(leftOf: separatorX, on: screen).map(\.windowID))
-        return MenuBarItems.all(on: screen)
-            .filter { hidden.contains($0.windowID) || $0.frame.minX >= screen.frame.minX }
-            .map { ($0, hidden.contains($0.windowID)) }
-    }
-
-    /// 把图标挪到分隔线左边（隐藏）或右边（显示）。需要辅助功能权限。
-    @MainActor
-    func setHidden(_ item: MenuBarItem, _ hide: Bool) async -> Bool {
-        guard MenuBarItems.ensureAccessibility(prompt: true) else { return false }
-        let wasCollapsed = isCollapsed
-        transition += 1
-        collapseTimer?.invalidate()
-        isCollapsed = false
-        try? await Task.sleep(nanoseconds: 150_000_000)
-        var moved = false
-        if let separatorFrame = cgFrame(of: separator) {
-            let x = hide ? separatorFrame.minX + 1 : separatorFrame.maxX + 2
-            moved = await MenuBarItems.move(item.windowID, to: CGPoint(x: x, y: separatorFrame.midY))
-        }
-        if wasCollapsed { collapse() } else { scheduleAutoCollapse() }
-        return moved
-    }
-
-    /// 状态项在全局坐标（左上角为原点）中的位置。
-    private func cgFrame(of item: NSStatusItem) -> CGRect? {
-        guard let frame = item.button?.window?.frame else { return nil }
-        let primaryTop = NSScreen.screens.first?.frame.maxY ?? frame.maxY
-        return CGRect(x: frame.minX, y: primaryTop - frame.maxY, width: frame.width, height: frame.height)
     }
 
     // MARK: - 外观
@@ -171,18 +126,10 @@ final class MenuBarController: NSObject {
         let settings = NSMenuItem(title: "设置…", action: #selector(settingsClicked), keyEquivalent: ",")
         settings.target = self
         menu.addItem(settings)
-        let log = NSMenuItem(title: "显示日志", action: #selector(showLog), keyEquivalent: "")
-        log.target = self
-        menu.addItem(log)
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "退出 BarMatrix", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
     }
 
     @objc private func settingsClicked() { openSettings() }
-
-    @objc private func showLog() {
-        if !FileManager.default.fileExists(atPath: Log.url.path) { Log.write("log created") }
-        NSWorkspace.shared.activateFileViewerSelecting([Log.url])
-    }
 }
