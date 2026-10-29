@@ -21,9 +21,8 @@ final class MenuBarController: NSObject {
     private var imageCache: [CGWindowID: CGImage] = [:]
     /// 已经为补截图临时展开过的图标，截不到的不再反复展开。
     private var peekedIDs = Set<CGWindowID>()
-    /// 临时挪到 ‹ 旁边显示的隐藏图标，之后要放回去。
+    /// 临时挪到分隔线右边显示的隐藏图标，之后要放回去。
     private var shownItem: CGWindowID?
-    private var rehideMonitor: Any?
     private var rehideTimer: Timer?
     private let panel = HiddenItemsPanel()
     private var cancellables = Set<AnyCancellable>()
@@ -55,8 +54,7 @@ final class MenuBarController: NSObject {
             button.sendAction(on: [.rightMouseUp])
         }
 
-        // 左键直接打开图标所属的应用；右键才展开菜单栏、弹出它的菜单。
-        // 左键：像 Bartender 一样把图标临时挪到 ‹ 旁边再打开它；右键：直接打开所属应用。
+        // 左键：把图标临时挪到分隔线右边显示一会儿；右键：直接打开所属应用。
         panel.onSelect = { [weak self] item in self?.showInPlace(item) }
         panel.onSecondarySelect = { [weak self] item in self?.openApp(item) }
 
@@ -191,10 +189,12 @@ final class MenuBarController: NSObject {
         NSWorkspace.shared.openApplication(at: url, configuration: configuration)
     }
 
-    // MARK: - 临时显示（Bartender 式）
+    // MARK: - 临时显示
 
-    /// 把隐藏的图标挪到 ‹ 左边（分隔符右边，即可见区域），收起菜单栏后再按下它，
-    /// 这样它的菜单就在 ‹ 和面板附近弹出。菜单用完后再放回隐藏区。
+    /// 临时显示的图标停留多久后自动放回隐藏区。
+    private static let showDuration: TimeInterval = 15
+
+    /// 把隐藏的图标挪到分隔线右边（可见区域）停留一段时间，超时后自动放回。
     private func showInPlace(_ item: MenuBarItem) {
         guard MenuBarItems.ensureAccessibility(prompt: true) else {
             Log.write("showInPlace: no accessibility, expanding instead")
@@ -208,54 +208,37 @@ final class MenuBarController: NSObject {
             self.transition += 1
             self.collapseTimer?.invalidate()
             self.isCollapsed = false
-            try? await Task.sleep(nanoseconds: 300_000_000)
+            try? await Task.sleep(nanoseconds: 150_000_000)
 
-            guard let toggleFrame = self.cgFrame(of: self.toggle) else { return }
+            guard let separatorFrame = self.cgFrame(of: self.separator) else { return }
             let moved = await MenuBarItems.move(item.windowID,
-                                                to: CGPoint(x: toggleFrame.minX + 2, y: toggleFrame.midY))
+                                                to: CGPoint(x: separatorFrame.maxX + 2, y: separatorFrame.midY))
             if moved {
                 self.shownItem = item.windowID
                 self.collapseNow()
-                try? await Task.sleep(nanoseconds: 350_000_000)
+                self.scheduleRehide(after: Self.showDuration)
             } else {
-                // 挪不动时退回到在原位置打开，并照常自动收起。
+                // 挪不动时退回到展开菜单栏，并照常自动收起。
                 self.scheduleAutoCollapse(force: true)
             }
-
-            guard let frame = MenuBarItems.frame(of: item.windowID) else { return }
-            Log.write("showInPlace: pressing window \(item.windowID) at \(frame)")
-            if !MenuBarItems.press(itemAt: frame, ownerPID: item.ownerPID) {
-                MenuBarItems.click(at: CGPoint(x: frame.midX, y: frame.midY))
-            }
-            if moved { self.startRehideWatch() }
         }
     }
 
-    /// 把临时显示的图标拖回分隔符左边。
+    /// 把临时显示的图标拖回分隔线左边。
     @MainActor
     private func rehide(_ windowID: CGWindowID) async {
-        stopRehideWatch()
+        rehideTimer?.invalidate()
+        rehideTimer = nil
         shownItem = nil
         let wasCollapsed = isCollapsed
         transition += 1
         collapseTimer?.invalidate()
         isCollapsed = false
-        try? await Task.sleep(nanoseconds: 300_000_000)
+        try? await Task.sleep(nanoseconds: 150_000_000)
         if let separatorFrame = cgFrame(of: separator) {
             _ = await MenuBarItems.move(windowID, to: CGPoint(x: separatorFrame.minX + 1, y: separatorFrame.midY))
         }
         if wasCollapsed { collapseNow() } else { scheduleAutoCollapse() }
-    }
-
-    /// 菜单关闭后的下一次点击（最迟 60 秒后）把图标放回隐藏区。
-    private func startRehideWatch() {
-        stopRehideWatch()
-        let started = Date()
-        rehideMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
-            guard Date().timeIntervalSince(started) > 0.5 else { return }
-            self?.scheduleRehide(after: 0.8)
-        }
-        scheduleRehide(after: 60)
     }
 
     private func scheduleRehide(after delay: TimeInterval) {
@@ -263,16 +246,23 @@ final class MenuBarController: NSObject {
         rehideTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self, let windowID = self.shownItem else { return }
+                // 用户正在用它的菜单时，挪动会把菜单关掉，稍后再试。
+                if Self.isMenuOpen || NSEvent.pressedMouseButtons != 0 {
+                    self.scheduleRehide(after: 5)
+                    return
+                }
                 await self.rehide(windowID)
             }
         }
     }
 
-    private func stopRehideWatch() {
-        if let rehideMonitor { NSEvent.removeMonitor(rehideMonitor) }
-        rehideMonitor = nil
-        rehideTimer?.invalidate()
-        rehideTimer = nil
+    /// 屏幕上有没有弹出的菜单窗口。
+    private static var isMenuOpen: Bool {
+        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else {
+            return false
+        }
+        let menuLevel = Int(CGWindowLevelForKey(.popUpMenuWindow))
+        return list.contains { ($0[kCGWindowLayer as String] as? Int) == menuLevel }
     }
 
     /// 立即收起，不再截图（调用方已经处理好缓存）。

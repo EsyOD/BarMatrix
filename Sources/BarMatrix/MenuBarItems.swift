@@ -214,7 +214,6 @@ enum MenuBarItems {
         return CGRect(origin: origin, size: extent)
     }
 
-    /// 在指定位置模拟一次左键点击，然后把鼠标放回原处。
     /// 模拟按住 ⌘ 拖动，把菜单栏图标挪到 destination（全局坐标，左上角为原点）。
     /// 和用户手动 ⌘ 拖动图标一样，需要图标当前显示在屏幕上。返回图标是否真的移动了。
     static func move(_ windowID: CGWindowID, to destination: CGPoint) async -> Bool {
@@ -234,20 +233,20 @@ enum MenuBarItems {
             try? await Task.sleep(nanoseconds: milliseconds * 1_000_000)
         }
 
+        // 拖动期间隐藏光标，并且一步拖到位，不让用户看到图标被拖着走。
+        CGDisplayHideCursor(CGMainDisplayID())
+        defer { CGDisplayShowCursor(CGMainDisplayID()) }
         post(.mouseMoved, origin)
-        await pause(30)
+        await pause(20)
         post(.leftMouseDown, origin)
-        await pause(80)
-        let steps = 10
-        for step in 1...steps {
-            let t = CGFloat(step) / CGFloat(steps)
-            post(.leftMouseDragged, CGPoint(x: origin.x + (destination.x - origin.x) * t, y: origin.y))
-            await pause(15)
-        }
-        await pause(60)
+        await pause(40)
+        post(.leftMouseDragged, CGPoint(x: origin.x + (destination.x > origin.x ? 4 : -4), y: origin.y))
+        await pause(20)
+        post(.leftMouseDragged, CGPoint(x: destination.x, y: origin.y))
+        await pause(30)
         post(.leftMouseUp, CGPoint(x: destination.x, y: origin.y))
         if let original { CGWarpMouseCursorPosition(original) }
-        await pause(250)
+        await pause(150)
 
         let end = frame(of: windowID)
         let moved = end.map { abs($0.midX - start.midX) > 1 } ?? false
