@@ -130,7 +130,7 @@ final class HiddenItemsPanel {
     /// 点击面板以外的地方时关闭。
     private func startMonitoringClicks() {
         guard clickMonitor == nil else { return }
-        // 右键面板里的图标：改为弹出它的菜单。
+        // 右键面板里的图标：直接打开所属应用。
         rightClickMonitor = NSEvent.addLocalMonitorForEvents(matching: .rightMouseDown) { [weak self] event in
             guard let self, event.window === self.window,
                   case .items(let items) = self.model.state,
