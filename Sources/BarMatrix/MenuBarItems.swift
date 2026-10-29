@@ -6,6 +6,7 @@ struct MenuBarItem: Identifiable {
     let windowID: CGWindowID
     /// 全局坐标，左上角为原点（和 CGEvent 一致）。
     let frame: CGRect
+    let ownerPID: pid_t
     let appName: String
     let appIcon: NSImage?
     var image: CGImage?
@@ -38,7 +39,7 @@ enum MenuBarItems {
             // 这时所属进程的图标并不代表这个菜单栏图标，就不拿它当占位。
             let hostedByControlCenter = app?.bundleIdentifier == "com.apple.controlcenter"
             let title = info[kCGWindowName as String] as? String
-            return MenuBarItem(windowID: id, frame: frame,
+            return MenuBarItem(windowID: id, frame: frame, ownerPID: pid,
                                appName: (hostedByControlCenter ? title : nil) ?? app?.localizedName ?? "",
                                appIcon: hostedByControlCenter ? nil : app?.icon, image: nil)
         }
@@ -145,6 +146,51 @@ enum MenuBarItems {
     static func ensureAccessibility(prompt: Bool) -> Bool {
         let options = ["AXTrustedCheckOptionPrompt": prompt] as CFDictionary
         return AXIsProcessTrustedWithOptions(options)
+    }
+
+    /// 用辅助功能接口找到位于 frame 处的菜单栏图标并“按下”它，效果和点击一样，
+    /// 但不用移动鼠标。找不到时返回 false。
+    static func press(itemAt frame: CGRect, ownerPID: pid_t?) -> Bool {
+        var apps = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy != .prohibited }
+        // 先查图标所属的应用（新版 macOS 上所属进程是控制中心，这时只能逐个找）。
+        if let ownerPID, let index = apps.firstIndex(where: { $0.processIdentifier == ownerPID }) {
+            apps.insert(apps.remove(at: index), at: 0)
+        }
+        for app in apps {
+            let axApp = AXUIElementCreateApplication(app.processIdentifier)
+            AXUIElementSetMessagingTimeout(axApp, 0.1)
+            guard let bar = attribute(axApp, kAXExtrasMenuBarAttribute),
+                  CFGetTypeID(bar) == AXUIElementGetTypeID(),
+                  let children = attribute(bar as! AXUIElement, kAXChildrenAttribute) as? [AXUIElement]
+            else { continue }
+            for element in children {
+                guard let elementFrame = axFrame(element),
+                      abs(elementFrame.midX - frame.midX) < 4,
+                      abs(elementFrame.midY - frame.midY) < 4 else { continue }
+                if AXUIElementPerformAction(element, kAXPressAction as CFString) == .success {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    private static func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else { return nil }
+        return value
+    }
+
+    private static func axFrame(_ element: AXUIElement) -> CGRect? {
+        guard let position = attribute(element, kAXPositionAttribute),
+              let size = attribute(element, kAXSizeAttribute),
+              CFGetTypeID(position) == AXValueGetTypeID(),
+              CFGetTypeID(size) == AXValueGetTypeID() else { return nil }
+        var origin = CGPoint.zero
+        var extent = CGSize.zero
+        AXValueGetValue(position as! AXValue, .cgPoint, &origin)
+        AXValueGetValue(size as! AXValue, .cgSize, &extent)
+        return CGRect(origin: origin, size: extent)
     }
 
     /// 在指定位置模拟一次左键点击，然后把鼠标放回原处。
