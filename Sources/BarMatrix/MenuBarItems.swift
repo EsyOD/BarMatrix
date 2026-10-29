@@ -156,6 +156,8 @@ enum MenuBarItems {
         if let ownerPID, let index = apps.firstIndex(where: { $0.processIdentifier == ownerPID }) {
             apps.insert(apps.remove(at: index), at: 0)
         }
+        var scanned = 0
+        var nearest: (distance: CGFloat, frame: CGRect, app: String)?
         for app in apps {
             let axApp = AXUIElementCreateApplication(app.processIdentifier)
             AXUIElementSetMessagingTimeout(axApp, 0.1)
@@ -164,14 +166,19 @@ enum MenuBarItems {
                   let children = attribute(bar as! AXUIElement, kAXChildrenAttribute) as? [AXUIElement]
             else { continue }
             for element in children {
-                guard let elementFrame = axFrame(element),
-                      abs(elementFrame.midX - frame.midX) < 4,
-                      abs(elementFrame.midY - frame.midY) < 4 else { continue }
-                if AXUIElementPerformAction(element, kAXPressAction as CFString) == .success {
-                    return true
+                scanned += 1
+                guard let elementFrame = axFrame(element) else { continue }
+                let distance = abs(elementFrame.midX - frame.midX) + abs(elementFrame.midY - frame.midY)
+                if distance < (nearest?.distance ?? .infinity) {
+                    nearest = (distance, elementFrame, app.localizedName ?? "?")
                 }
+                guard distance < 8 else { continue }
+                let result = AXUIElementPerformAction(element, kAXPressAction as CFString)
+                Log.write("press: AXPress on \(app.localizedName ?? "?") at \(elementFrame) -> \(result.rawValue)")
+                if result == .success { return true }
             }
         }
+        Log.write("press: no match for \(frame); scanned \(scanned) extras, nearest \(String(describing: nearest))")
         return false
     }
 
@@ -194,15 +201,24 @@ enum MenuBarItems {
     }
 
     /// 在指定位置模拟一次左键点击，然后把鼠标放回原处。
+    /// 先把鼠标移过去，按下和抬起之间留一点间隔，太快的点击有时会被菜单栏忽略。
     static func click(at point: CGPoint) {
+        Log.write("click: synthesized click at \(point)")
         let original = CGEvent(source: nil)?.location
         let source = CGEventSource(stateID: .hidSystemState)
-        for type in [CGEventType.leftMouseDown, .leftMouseUp] {
+        func post(_ type: CGEventType) {
             CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: point, mouseButton: .left)?
                 .post(tap: .cghidEventTap)
         }
-        if let original {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { CGWarpMouseCursorPosition(original) }
+        post(.mouseMoved)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) {
+            post(.leftMouseDown)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) {
+                post(.leftMouseUp)
+                if let original {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { CGWarpMouseCursorPosition(original) }
+                }
+            }
         }
     }
 }
