@@ -29,7 +29,7 @@ final class HiddenItemsPanel {
 
     var isVisible: Bool { window.isVisible }
     var onSelect: (MenuBarItem) -> Void = { _ in }
-    var onOpenApp: (MenuBarItem) -> Void = { _ in }
+    var onSecondarySelect: (MenuBarItem) -> Void = { _ in }
 
     init() {
         let model = Model()
@@ -130,7 +130,7 @@ final class HiddenItemsPanel {
     /// 点击面板以外的地方时关闭。
     private func startMonitoringClicks() {
         guard clickMonitor == nil else { return }
-        // 右键面板里的图标：直接打开它所属的应用。
+        // 右键面板里的图标：改为弹出它的菜单。
         rightClickMonitor = NSEvent.addLocalMonitorForEvents(matching: .rightMouseDown) { [weak self] event in
             guard let self, event.window === self.window,
                   case .items(let items) = self.model.state,
@@ -138,7 +138,7 @@ final class HiddenItemsPanel {
             else { return event }
             self.close()
             Log.write("panel: right-clicked window \(item.windowID)")
-            self.onOpenApp(item)
+            self.onSecondarySelect(item)
             return nil
         }
         clickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
@@ -211,7 +211,7 @@ struct HiddenItemsView: View {
                 }
                 if !model.canClick {
                     Button { model.onRequestAccessibility() } label: {
-                        Label("点击打开图标需要「辅助功能」权限", systemImage: "hand.tap")
+                        Label("识别图标所属的应用需要「辅助功能」权限", systemImage: "hand.tap")
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                     }
