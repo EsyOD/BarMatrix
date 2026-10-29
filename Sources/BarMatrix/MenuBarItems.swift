@@ -31,9 +31,13 @@ enum MenuBarItems {
                   frame.minY <= 1, frame.height < 60, frame.width > 0
             else { return nil }
             let app = NSRunningApplication(processIdentifier: pid)
+            // 新版 macOS 把所有菜单栏图标窗口都交给「控制中心」托管，
+            // 这时所属进程的图标并不代表这个菜单栏图标，就不拿它当占位。
+            let hostedByControlCenter = app?.bundleIdentifier == "com.apple.controlcenter"
+            let title = info[kCGWindowName as String] as? String
             return MenuBarItem(windowID: id, frame: frame,
-                               appName: app?.localizedName ?? "",
-                               appIcon: app?.icon, image: nil)
+                               appName: (hostedByControlCenter ? title : nil) ?? app?.localizedName ?? "",
+                               appIcon: hostedByControlCenter ? nil : app?.icon, image: nil)
         }
         .sorted { $0.frame.minX < $1.frame.minX }
     }
@@ -52,26 +56,71 @@ enum MenuBarItems {
     static var canCapture: Bool { CGPreflightScreenCaptureAccess() }
 
     /// 截取每个图标窗口的画面。窗口被挤出屏幕时同样能截到。
+    ///
+    /// 优先用 CGWindowListCreateImage：它能截到屏幕外的窗口，而 ScreenCaptureKit
+    /// 在部分系统版本上对菜单栏图标窗口会失败或返回空白，只作为后备。
     static func captureImages(for items: [MenuBarItem]) async -> [CGWindowID: CGImage] {
-        guard canCapture,
-              let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
-        else { return [:] }
+        guard canCapture else { return [:] }
 
-        let wanted = Set(items.map(\.windowID))
-        let scale = await MainActor.run { NSScreen.main?.backingScaleFactor ?? 2 }
         var images: [CGWindowID: CGImage] = [:]
-        for window in content.windows where wanted.contains(window.windowID) {
+        for item in items {
+            if let image = windowImage(item.windowID), !isBlank(image) {
+                images[item.windowID] = image
+            }
+        }
+
+        let missing = Set(items.map(\.windowID)).subtracting(images.keys)
+        guard !missing.isEmpty,
+              let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+        else { return images }
+
+        let scale = await MainActor.run { NSScreen.main?.backingScaleFactor ?? 2 }
+        for window in content.windows where missing.contains(window.windowID) {
             let config = SCStreamConfiguration()
             config.width = Int(window.frame.width * scale)
             config.height = Int(window.frame.height * scale)
             config.showsCursor = false
             config.captureResolution = .best
             let filter = SCContentFilter(desktopIndependentWindow: window)
-            if let image = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config) {
+            if let image = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config),
+               !isBlank(image) {
                 images[window.windowID] = image
             }
         }
         return images
+    }
+
+    /// CGWindowListCreateImage 在新版 SDK 里被标为不可用，但系统里仍然存在，
+    /// 所以运行时动态查找，避免换 Xcode 版本后编译失败。
+    private typealias CreateImageFunc = @convention(c) (CGRect, UInt32, CGWindowID, UInt32) -> Unmanaged<CGImage>?
+    private static let createImage: CreateImageFunc? = {
+        guard let handle = dlopen("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics", RTLD_LAZY),
+              let symbol = dlsym(handle, "CGWindowListCreateImage") else { return nil }
+        return unsafeBitCast(symbol, to: CreateImageFunc.self)
+    }()
+
+    private static func windowImage(_ windowID: CGWindowID) -> CGImage? {
+        guard let createImage else { return nil }
+        let options: CGWindowImageOption = [.boundsIgnoreFraming, .bestResolution]
+        return createImage(.null, CGWindowListOption.optionIncludingWindow.rawValue, windowID, options.rawValue)?
+            .takeRetainedValue()
+    }
+
+    /// 截图是否几乎完全透明（截取失败时常见）。
+    private static func isBlank(_ image: CGImage) -> Bool {
+        let size = 16
+        var pixels = [UInt8](repeating: 0, count: size * size * 4)
+        let drawn: Bool = pixels.withUnsafeMutableBytes { buffer in
+            guard let context = CGContext(data: buffer.baseAddress, width: size, height: size,
+                                          bitsPerComponent: 8, bytesPerRow: size * 4,
+                                          space: CGColorSpaceCreateDeviceRGB(),
+                                          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+            else { return false }
+            context.draw(image, in: CGRect(x: 0, y: 0, width: size, height: size))
+            return true
+        }
+        guard drawn else { return true }
+        return !stride(from: 3, to: pixels.count, by: 4).contains { pixels[$0] > 16 }
     }
 
     // MARK: - 点击（需要“辅助功能”权限）
