@@ -17,7 +17,9 @@ enum MenuBarItems {
     private static let statusLevel = Int(CGWindowLevelForKey(.statusWindow))
 
     /// 当前所有菜单栏图标的位置。只读位置和所属进程，不需要任何权限。
-    static func all() -> [MenuBarItem] {
+    /// 传入 screen 时只返回那块屏幕菜单栏上的图标（多屏时每块屏幕都有各自的图标窗口）。
+    static func all(on screen: NSScreen? = nil) -> [MenuBarItem] {
+        let rowTop = screen.map { menuBarTop(of: $0) }
         guard let list = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] else {
             return []
         }
@@ -28,7 +30,8 @@ enum MenuBarItems {
                   let bounds = info[kCGWindowBounds as String] as? NSDictionary,
                   let frame = CGRect(dictionaryRepresentation: bounds as CFDictionary),
                   let id = info[kCGWindowNumber as String] as? CGWindowID,
-                  frame.minY <= 1, frame.height < 60, frame.width > 0
+                  frame.height < 60, frame.width > 0,
+                  rowTop.map({ abs(frame.minY - $0) <= 1 }) ?? true
             else { return nil }
             let app = NSRunningApplication(processIdentifier: pid)
             // 新版 macOS 把所有菜单栏图标窗口都交给「控制中心」托管，
@@ -43,8 +46,20 @@ enum MenuBarItems {
     }
 
     /// 分隔符左边的图标就是被隐藏的图标。
-    static func hidden(leftOf separatorX: CGFloat) -> [MenuBarItem] {
-        all().filter { $0.frame.maxX <= separatorX + 1 }
+    ///
+    /// 展开时它们在屏幕左边缘和分隔符之间；折叠时分隔符本身伸到了屏幕外很远的地方，
+    /// 被挤出去的图标在它左边。这样不会把左侧另一块屏幕上的图标算进来。
+    static func hidden(leftOf separatorX: CGFloat, on screen: NSScreen) -> [MenuBarItem] {
+        let screenMinX = screen.frame.minX
+        return all(on: screen).filter {
+            $0.frame.maxX <= separatorX + 1 && ($0.frame.minX >= screenMinX || separatorX < screenMinX)
+        }
+    }
+
+    /// 屏幕菜单栏顶边在 CG 坐标系（左上角为原点）中的 y 值。
+    static func menuBarTop(of screen: NSScreen) -> CGFloat {
+        let primaryTop = NSScreen.screens.first?.frame.maxY ?? screen.frame.maxY
+        return primaryTop - screen.frame.maxY
     }
 
     static func frame(of windowID: CGWindowID) -> CGRect? {
