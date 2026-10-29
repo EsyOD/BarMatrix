@@ -215,6 +215,46 @@ enum MenuBarItems {
     }
 
     /// 在指定位置模拟一次左键点击，然后把鼠标放回原处。
+    /// 模拟按住 ⌘ 拖动，把菜单栏图标挪到 destination（全局坐标，左上角为原点）。
+    /// 和用户手动 ⌘ 拖动图标一样，需要图标当前显示在屏幕上。返回图标是否真的移动了。
+    static func move(_ windowID: CGWindowID, to destination: CGPoint) async -> Bool {
+        guard let start = frame(of: windowID) else {
+            Log.write("move: window \(windowID) not found")
+            return false
+        }
+        let origin = CGPoint(x: start.midX, y: start.midY)
+        let original = CGEvent(source: nil)?.location
+        let source = CGEventSource(stateID: .combinedSessionState)
+        func post(_ type: CGEventType, _ point: CGPoint) {
+            let event = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: point, mouseButton: .left)
+            event?.flags = .maskCommand
+            event?.post(tap: .cghidEventTap)
+        }
+        func pause(_ milliseconds: UInt64) async {
+            try? await Task.sleep(nanoseconds: milliseconds * 1_000_000)
+        }
+
+        post(.mouseMoved, origin)
+        await pause(30)
+        post(.leftMouseDown, origin)
+        await pause(80)
+        let steps = 10
+        for step in 1...steps {
+            let t = CGFloat(step) / CGFloat(steps)
+            post(.leftMouseDragged, CGPoint(x: origin.x + (destination.x - origin.x) * t, y: origin.y))
+            await pause(15)
+        }
+        await pause(60)
+        post(.leftMouseUp, CGPoint(x: destination.x, y: origin.y))
+        if let original { CGWarpMouseCursorPosition(original) }
+        await pause(250)
+
+        let end = frame(of: windowID)
+        let moved = end.map { abs($0.midX - start.midX) > 1 } ?? false
+        Log.write("move: window \(windowID) from \(start) toward \(destination) -> \(String(describing: end)), moved \(moved)")
+        return moved
+    }
+
     /// 先把鼠标移过去，按下和抬起之间留一点间隔，太快的点击有时会被菜单栏忽略。
     static func click(at point: CGPoint) {
         Log.write("click: synthesized click at \(point)")

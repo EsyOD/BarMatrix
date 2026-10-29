@@ -21,6 +21,10 @@ final class MenuBarController: NSObject {
     private var imageCache: [CGWindowID: CGImage] = [:]
     /// 已经为补截图临时展开过的图标，截不到的不再反复展开。
     private var peekedIDs = Set<CGWindowID>()
+    /// 临时挪到 ‹ 旁边显示的隐藏图标，之后要放回去。
+    private var shownItem: CGWindowID?
+    private var rehideMonitor: Any?
+    private var rehideTimer: Timer?
     private let panel = HiddenItemsPanel()
     private var cancellables = Set<AnyCancellable>()
 
@@ -52,8 +56,9 @@ final class MenuBarController: NSObject {
         }
 
         // 左键直接打开图标所属的应用；右键才展开菜单栏、弹出它的菜单。
-        panel.onSelect = { [weak self] item in self?.openApp(item) }
-        panel.onSecondarySelect = { [weak self] item in self?.activate(item) }
+        // 左键：像 Bartender 一样把图标临时挪到 ‹ 旁边再打开它；右键：直接打开所属应用。
+        panel.onSelect = { [weak self] item in self?.showInPlace(item) }
+        panel.onSecondarySelect = { [weak self] item in self?.openApp(item) }
 
         prefs.$showSeparator
             .receive(on: RunLoop.main)
@@ -186,23 +191,103 @@ final class MenuBarController: NSObject {
         NSWorkspace.shared.openApplication(at: url, configuration: configuration)
     }
 
-    /// 临时展开菜单栏，再替用户按下真正的图标，弹出它的菜单。
-    private func activate(_ item: MenuBarItem) {
-        expand(temporarily: true)
-        let trusted = MenuBarItems.ensureAccessibility(prompt: true)
-        Log.write("activate: window \(item.windowID) owner \(item.ownerPID) frame \(item.frame) accessibility \(trusted)")
-        guard trusted else { return }
-        // 等菜单栏重新排好图标的位置。
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-            guard let frame = MenuBarItems.frame(of: item.windowID) else {
-                Log.write("activate: window \(item.windowID) no longer exists")
-                return
+    // MARK: - 临时显示（Bartender 式）
+
+    /// 把隐藏的图标挪到 ‹ 左边（分隔符右边，即可见区域），收起菜单栏后再按下它，
+    /// 这样它的菜单就在 ‹ 和面板附近弹出。菜单用完后再放回隐藏区。
+    private func showInPlace(_ item: MenuBarItem) {
+        guard MenuBarItems.ensureAccessibility(prompt: true) else {
+            Log.write("showInPlace: no accessibility, expanding instead")
+            expand(temporarily: true)
+            return
+        }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            if let previous = self.shownItem { await self.rehide(previous) }
+
+            self.transition += 1
+            self.collapseTimer?.invalidate()
+            self.isCollapsed = false
+            try? await Task.sleep(nanoseconds: 300_000_000)
+
+            guard let toggleFrame = self.cgFrame(of: self.toggle) else { return }
+            let moved = await MenuBarItems.move(item.windowID,
+                                                to: CGPoint(x: toggleFrame.minX + 2, y: toggleFrame.midY))
+            if moved {
+                self.shownItem = item.windowID
+                self.collapseNow()
+                try? await Task.sleep(nanoseconds: 350_000_000)
+            } else {
+                // 挪不动时退回到在原位置打开，并照常自动收起。
+                self.scheduleAutoCollapse(force: true)
             }
-            Log.write("activate: expanded frame \(frame)")
+
+            guard let frame = MenuBarItems.frame(of: item.windowID) else { return }
+            Log.write("showInPlace: pressing window \(item.windowID) at \(frame)")
             if !MenuBarItems.press(itemAt: frame, ownerPID: item.ownerPID) {
                 MenuBarItems.click(at: CGPoint(x: frame.midX, y: frame.midY))
             }
+            if moved { self.startRehideWatch() }
         }
+    }
+
+    /// 把临时显示的图标拖回分隔符左边。
+    @MainActor
+    private func rehide(_ windowID: CGWindowID) async {
+        stopRehideWatch()
+        shownItem = nil
+        let wasCollapsed = isCollapsed
+        transition += 1
+        collapseTimer?.invalidate()
+        isCollapsed = false
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        if let separatorFrame = cgFrame(of: separator) {
+            _ = await MenuBarItems.move(windowID, to: CGPoint(x: separatorFrame.minX + 1, y: separatorFrame.midY))
+        }
+        if wasCollapsed { collapseNow() } else { scheduleAutoCollapse() }
+    }
+
+    /// 菜单关闭后的下一次点击（最迟 60 秒后）把图标放回隐藏区。
+    private func startRehideWatch() {
+        stopRehideWatch()
+        let started = Date()
+        rehideMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
+            guard Date().timeIntervalSince(started) > 0.5 else { return }
+            self?.scheduleRehide(after: 0.8)
+        }
+        scheduleRehide(after: 60)
+    }
+
+    private func scheduleRehide(after delay: TimeInterval) {
+        rehideTimer?.invalidate()
+        rehideTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, let windowID = self.shownItem else { return }
+                await self.rehide(windowID)
+            }
+        }
+    }
+
+    private func stopRehideWatch() {
+        if let rehideMonitor { NSEvent.removeMonitor(rehideMonitor) }
+        rehideMonitor = nil
+        rehideTimer?.invalidate()
+        rehideTimer = nil
+    }
+
+    /// 立即收起，不再截图（调用方已经处理好缓存）。
+    private func collapseNow() {
+        guard isSeparatorLeftOfToggle else { return }
+        transition += 1
+        collapseTimer?.invalidate()
+        isCollapsed = true
+    }
+
+    /// 状态项在全局坐标（左上角为原点）中的位置。
+    private func cgFrame(of item: NSStatusItem) -> CGRect? {
+        guard let frame = item.button?.window?.frame else { return nil }
+        let primaryTop = NSScreen.screens.first?.frame.maxY ?? frame.maxY
+        return CGRect(x: frame.minX, y: primaryTop - frame.maxY, width: frame.width, height: frame.height)
     }
 
     // MARK: - 外观
@@ -243,7 +328,15 @@ final class MenuBarController: NSObject {
             panel.close()
             collapse()
         } else if prefs.clickOpensPanel != flags.contains(.option) {
-            togglePanel()
+            if let windowID = shownItem, !panel.isVisible {
+                // 先把上次临时显示的图标放回去，面板里才会有它。
+                Task { @MainActor [weak self] in
+                    await self?.rehide(windowID)
+                    self?.togglePanel()
+                }
+            } else {
+                togglePanel()
+            }
         } else {
             expand()
         }
