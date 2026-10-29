@@ -51,7 +51,9 @@ final class MenuBarController: NSObject {
             button.sendAction(on: [.rightMouseUp])
         }
 
-        panel.onSelect = { [weak self] item in self?.activate(item) }
+        // 左键直接打开图标所属的应用；右键才展开菜单栏、弹出它的菜单。
+        panel.onSelect = { [weak self] item in self?.openApp(item) }
+        panel.onSecondarySelect = { [weak self] item in self?.activate(item) }
 
         prefs.$showSeparator
             .receive(on: RunLoop.main)
@@ -166,7 +168,25 @@ final class MenuBarController: NSObject {
         peekedIDs.formIntersection(alive)
     }
 
-    /// 点击面板里的图标：临时展开菜单栏，再替用户按下真正的图标。
+    /// 打开（激活）图标所属的应用，菜单栏保持收起。
+    private func openApp(_ item: MenuBarItem) {
+        let trusted = MenuBarItems.ensureAccessibility(prompt: false)
+        let app = MenuBarItems.owningApp(ofItemAt: item.frame, ownerPID: trusted ? item.ownerPID : nil)
+            ?? NSRunningApplication(processIdentifier: item.ownerPID).flatMap {
+                $0.bundleIdentifier == "com.apple.controlcenter" ? nil : $0
+            }
+        guard let app, let url = app.bundleURL else {
+            Log.write("openApp: owner of window \(item.windowID) not found (accessibility \(trusted))")
+            NSSound.beep()
+            return
+        }
+        Log.write("openApp: \(app.localizedName ?? "?") at \(url.path)")
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        NSWorkspace.shared.openApplication(at: url, configuration: configuration)
+    }
+
+    /// 临时展开菜单栏，再替用户按下真正的图标，弹出它的菜单。
     private func activate(_ item: MenuBarItem) {
         expand(temporarily: true)
         let trusted = MenuBarItems.ensureAccessibility(prompt: true)
