@@ -1,5 +1,4 @@
 import AppKit
-import ScreenCaptureKit
 
 /// 菜单栏里其他应用的一个图标（一个状态栏窗口）。
 struct MenuBarItem: Identifiable {
@@ -9,7 +8,6 @@ struct MenuBarItem: Identifiable {
     let ownerPID: pid_t
     let appName: String
     let appIcon: NSImage?
-    var image: CGImage?
 
     var id: CGWindowID { windowID }
 }
@@ -41,7 +39,7 @@ enum MenuBarItems {
             let title = info[kCGWindowName as String] as? String
             return MenuBarItem(windowID: id, frame: frame, ownerPID: pid,
                                appName: (hostedByControlCenter ? title : nil) ?? app?.localizedName ?? "",
-                               appIcon: hostedByControlCenter ? nil : app?.icon, image: nil)
+                               appIcon: hostedByControlCenter ? nil : app?.icon)
         }
         .sorted { $0.frame.minX < $1.frame.minX }
     }
@@ -67,79 +65,7 @@ enum MenuBarItems {
         all().first { $0.windowID == windowID }?.frame
     }
 
-    // MARK: - 截图（需要“屏幕录制”权限）
-
-    static var canCapture: Bool { CGPreflightScreenCaptureAccess() }
-
-    /// 截取每个图标窗口的画面。窗口被挤出屏幕时同样能截到。
-    ///
-    /// 优先用 CGWindowListCreateImage：它能截到屏幕外的窗口，而 ScreenCaptureKit
-    /// 在部分系统版本上对菜单栏图标窗口会失败或返回空白，只作为后备。
-    static func captureImages(for items: [MenuBarItem]) async -> [CGWindowID: CGImage] {
-        guard canCapture else { return [:] }
-
-        var images: [CGWindowID: CGImage] = [:]
-        for item in items {
-            if let image = windowImage(item.windowID), !isBlank(image) {
-                images[item.windowID] = image
-            }
-        }
-
-        let missing = Set(items.map(\.windowID)).subtracting(images.keys)
-        guard !missing.isEmpty,
-              let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
-        else { return images }
-
-        let scale = await MainActor.run { NSScreen.main?.backingScaleFactor ?? 2 }
-        for window in content.windows where missing.contains(window.windowID) {
-            let config = SCStreamConfiguration()
-            config.width = Int(window.frame.width * scale)
-            config.height = Int(window.frame.height * scale)
-            config.showsCursor = false
-            config.captureResolution = .best
-            let filter = SCContentFilter(desktopIndependentWindow: window)
-            if let image = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config),
-               !isBlank(image) {
-                images[window.windowID] = image
-            }
-        }
-        return images
-    }
-
-    /// CGWindowListCreateImage 在新版 SDK 里被标为不可用，但系统里仍然存在，
-    /// 所以运行时动态查找，避免换 Xcode 版本后编译失败。
-    private typealias CreateImageFunc = @convention(c) (CGRect, UInt32, CGWindowID, UInt32) -> Unmanaged<CGImage>?
-    private static let createImage: CreateImageFunc? = {
-        guard let handle = dlopen("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics", RTLD_LAZY),
-              let symbol = dlsym(handle, "CGWindowListCreateImage") else { return nil }
-        return unsafeBitCast(symbol, to: CreateImageFunc.self)
-    }()
-
-    private static func windowImage(_ windowID: CGWindowID) -> CGImage? {
-        guard let createImage else { return nil }
-        let options: CGWindowImageOption = [.boundsIgnoreFraming, .bestResolution]
-        return createImage(.null, CGWindowListOption.optionIncludingWindow.rawValue, windowID, options.rawValue)?
-            .takeRetainedValue()
-    }
-
-    /// 截图是否几乎完全透明（截取失败时常见）。
-    private static func isBlank(_ image: CGImage) -> Bool {
-        let size = 16
-        var pixels = [UInt8](repeating: 0, count: size * size * 4)
-        let drawn: Bool = pixels.withUnsafeMutableBytes { buffer in
-            guard let context = CGContext(data: buffer.baseAddress, width: size, height: size,
-                                          bitsPerComponent: 8, bytesPerRow: size * 4,
-                                          space: CGColorSpaceCreateDeviceRGB(),
-                                          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
-            else { return false }
-            context.draw(image, in: CGRect(x: 0, y: 0, width: size, height: size))
-            return true
-        }
-        guard drawn else { return true }
-        return !stride(from: 3, to: pixels.count, by: 4).contains { pixels[$0] > 16 }
-    }
-
-    // MARK: - 点击（需要“辅助功能”权限）
+    // MARK: - 辅助功能
 
     /// 检查辅助功能权限，没有时弹出系统授权提示。
     @discardableResult
@@ -148,34 +74,37 @@ enum MenuBarItems {
         return AXIsProcessTrustedWithOptions(options)
     }
 
-    /// 用辅助功能接口找到位于 frame 处的菜单栏图标并“按下”它，效果和点击一样，
-    /// 但不用移动鼠标。找不到时返回 false。
-    static func press(itemAt frame: CGRect, ownerPID: pid_t?) -> Bool {
-        guard let found = findExtra(at: frame, ownerPID: ownerPID) else { return false }
-        let (element, app) = found
-        let result = AXUIElementPerformAction(element, kAXPressAction as CFString)
-        Log.write("press: AXPress on \(app.localizedName ?? "?") -> \(result.rawValue)")
-        return result == .success
-    }
-
-    /// 真正拥有这个菜单栏图标的应用。新版 macOS 上图标窗口都属于控制中心，
-    /// 只能通过辅助功能接口按位置反查。
-    static func owningApp(ofItemAt frame: CGRect, ownerPID: pid_t?) -> NSRunningApplication? {
-        if let app = findExtra(at: frame, ownerPID: ownerPID)?.app { return app }
-        guard let ownerPID, let app = NSRunningApplication(processIdentifier: ownerPID),
-              app.bundleIdentifier != "com.apple.controlcenter" else { return nil }
-        return app
-    }
-
-    private static func findExtra(at frame: CGRect, ownerPID: pid_t?) -> (element: AXUIElement, app: NSRunningApplication)? {
-        var apps = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy != .prohibited }
-        // 先查图标所属的应用（新版 macOS 上所属进程是控制中心，这时只能逐个找）。
-        if let ownerPID, let index = apps.firstIndex(where: { $0.processIdentifier == ownerPID }) {
-            apps.insert(apps.remove(at: index), at: 0)
+    /// 菜单栏图标的名字和图标，用于设置里的列表。
+    ///
+    /// 新版 macOS 上图标窗口都属于控制中心，真正的应用只能通过辅助功能接口按位置反查。
+    /// 一次性扫描所有应用的菜单栏图标，再按位置匹配。
+    static func describe(_ items: [MenuBarItem]) -> [CGWindowID: (name: String, icon: NSImage?)] {
+        let extras = allExtras()
+        var result: [CGWindowID: (name: String, icon: NSImage?)] = [:]
+        for item in items {
+            let match = extras.min {
+                distance($0.frame, item.frame) < distance($1.frame, item.frame)
+            }.flatMap { distance($0.frame, item.frame) < 8 ? $0 : nil }
+            guard let match else {
+                result[item.windowID] = (item.appName.isEmpty ? "未知图标" : item.appName, item.appIcon)
+                continue
+            }
+            let appName = match.app.localizedName ?? ""
+            // 系统自带的图标（Wi‑Fi、电池等）都属于控制中心或 SystemUIServer，用它们自己的描述。
+            let isSystem = ["com.apple.controlcenter", "com.apple.systemuiserver"].contains(match.app.bundleIdentifier ?? "")
+            let name = isSystem ? (match.title ?? appName) : (appName.isEmpty ? (match.title ?? "未知图标") : appName)
+            result[item.windowID] = (name, match.app.icon)
         }
-        var scanned = 0
-        var nearest: (distance: CGFloat, frame: CGRect, app: String)?
-        for app in apps {
+        return result
+    }
+
+    private static func distance(_ a: CGRect, _ b: CGRect) -> CGFloat {
+        abs(a.midX - b.midX) + abs(a.midY - b.midY)
+    }
+
+    private static func allExtras() -> [(frame: CGRect, app: NSRunningApplication, title: String?)] {
+        var extras: [(frame: CGRect, app: NSRunningApplication, title: String?)] = []
+        for app in NSWorkspace.shared.runningApplications where app.activationPolicy != .prohibited {
             let axApp = AXUIElementCreateApplication(app.processIdentifier)
             AXUIElementSetMessagingTimeout(axApp, 0.1)
             guard let bar = attribute(axApp, kAXExtrasMenuBarAttribute),
@@ -183,17 +112,14 @@ enum MenuBarItems {
                   let children = attribute(bar as! AXUIElement, kAXChildrenAttribute) as? [AXUIElement]
             else { continue }
             for element in children {
-                scanned += 1
-                guard let elementFrame = axFrame(element) else { continue }
-                let distance = abs(elementFrame.midX - frame.midX) + abs(elementFrame.midY - frame.midY)
-                if distance < (nearest?.distance ?? .infinity) {
-                    nearest = (distance, elementFrame, app.localizedName ?? "?")
-                }
-                if distance < 8 { return (element, app) }
+                guard let frame = axFrame(element) else { continue }
+                let title = [kAXDescriptionAttribute, kAXTitleAttribute, kAXHelpAttribute]
+                    .lazy.compactMap { attribute(element, $0) as? String }
+                    .first { !$0.isEmpty }
+                extras.append((frame, app, title))
             }
         }
-        Log.write("ax: no extra at \(frame); scanned \(scanned), nearest \(String(describing: nearest))")
-        return nil
+        return extras
     }
 
     private static func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
@@ -252,26 +178,5 @@ enum MenuBarItems {
         let moved = end.map { abs($0.midX - start.midX) > 1 } ?? false
         Log.write("move: window \(windowID) from \(start) toward \(destination) -> \(String(describing: end)), moved \(moved)")
         return moved
-    }
-
-    /// 先把鼠标移过去，按下和抬起之间留一点间隔，太快的点击有时会被菜单栏忽略。
-    static func click(at point: CGPoint) {
-        Log.write("click: synthesized click at \(point)")
-        let original = CGEvent(source: nil)?.location
-        let source = CGEventSource(stateID: .hidSystemState)
-        func post(_ type: CGEventType) {
-            CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: point, mouseButton: .left)?
-                .post(tap: .cghidEventTap)
-        }
-        post(.mouseMoved)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) {
-            post(.leftMouseDown)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) {
-                post(.leftMouseUp)
-                if let original {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { CGWarpMouseCursorPosition(original) }
-                }
-            }
-        }
     }
 }
