@@ -19,6 +19,8 @@ final class MenuBarController: NSObject {
     private var transition = 0
     /// 隐藏图标的截图，在它们还显示在菜单栏上时截取。
     private var imageCache: [CGWindowID: CGImage] = [:]
+    /// 已经为补截图临时展开过的图标，截不到的不再反复展开。
+    private var peekedIDs = Set<CGWindowID>()
     private let panel = HiddenItemsPanel()
     private var cancellables = Set<AnyCancellable>()
 
@@ -102,14 +104,36 @@ final class MenuBarController: NSObject {
 
     // MARK: - 弹出面板
 
+    private var currentScreen: NSScreen? { toggle.button?.window?.screen ?? NSScreen.main }
+
     private func togglePanel() {
         if panel.isVisible {
             panel.close()
             return
         }
-        guard let anchor = toggle.button?.window?.frame,
+        guard let screen = currentScreen,
               let separatorX = separator.button?.window?.frame.minX else { return }
-        let items = MenuBarItems.hidden(leftOf: separatorX).map { item in
+        let missing = MenuBarItems.hidden(leftOf: separatorX, on: screen)
+            .map(\.windowID)
+            .filter { imageCache[$0] == nil && !peekedIDs.contains($0) }
+        if isCollapsed && !missing.isEmpty && MenuBarItems.canCapture {
+            // 例如切换屏幕后图标窗口换了一批，缓存里没有它们的截图：
+            // 先短暂展开让系统画出来，截好图再弹出面板。
+            peekedIDs.formUnion(missing)
+            Task { @MainActor [weak self] in
+                await self?.peekAndCache()
+                self?.showPanel()
+            }
+        } else {
+            showPanel()
+        }
+    }
+
+    private func showPanel() {
+        guard let screen = currentScreen,
+              let anchor = toggle.button?.window?.frame,
+              let separatorX = separator.button?.window?.frame.minX else { return }
+        let items = MenuBarItems.hidden(leftOf: separatorX, on: screen).map { item in
             var item = item
             item.image = imageCache[item.windowID]
             return item
@@ -117,15 +141,29 @@ final class MenuBarController: NSObject {
         panel.show(items: items, below: anchor)
     }
 
+    /// 不触发自动折叠地展开一瞬间，截图后立即收回。
+    @MainActor
+    private func peekAndCache() async {
+        transition += 1
+        let current = transition
+        isCollapsed = false
+        try? await Task.sleep(nanoseconds: 250_000_000)
+        await refreshImageCache()
+        guard current == transition, isSeparatorLeftOfToggle else { return }
+        isCollapsed = true
+    }
+
     @MainActor
     private func refreshImageCache() async {
         guard MenuBarItems.canCapture,
+              let screen = currentScreen,
               let separatorX = separator.button?.window?.frame.minX else { return }
-        let all = MenuBarItems.all()
-        let visible = all.filter { $0.frame.maxX <= separatorX + 1 && $0.frame.minX >= 0 }
+        let visible = MenuBarItems.all(on: screen)
+            .filter { $0.frame.maxX <= separatorX + 1 && $0.frame.minX >= screen.frame.minX }
         let images = await MenuBarItems.captureImages(for: visible)
-        let alive = Set(all.map(\.windowID))
+        let alive = Set(MenuBarItems.all().map(\.windowID))
         imageCache = imageCache.filter { alive.contains($0.key) }.merging(images) { _, new in new }
+        peekedIDs.formIntersection(alive)
     }
 
     /// 点击面板里的图标：临时展开菜单栏，再替用户点一下真正的图标。
